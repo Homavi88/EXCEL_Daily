@@ -78,7 +78,7 @@ Public Sub AppendTablesToMaster()
         whereProc = "AppendTablesToMaster / CreateMasterWorkbook"
         Set mstWb = CreateMasterWorkbook(srcWb, sheetNames, errMsg)
         If mstWb Is Nothing Then
-            ' Soft validation failure — errMsg already set; do NOT use Err (Number=0)
+            ' Soft validation failure -- errMsg already set; do NOT use Err (Number=0)
             If Len(errMsg) = 0 Then
                 errMsg = "Не удалось создать мастер-книгу."
             End If
@@ -185,7 +185,7 @@ Private Function FormatRuntimeError(ByVal errNum As Long, _
     desc = Trim$(errDesc)
     If Len(desc) = 0 Then
         If errNum = 0 Then
-            desc = "(нет текста Err.Description — сбой без runtime-ошибки VBA)"
+            desc = "(нет текста Err.Description -- сбой без runtime-ошибки VBA)"
         Else
             desc = "(пустое описание)"
         End If
@@ -208,20 +208,20 @@ End Function
 '------------------------------------------------------------------------------
 Private Function FileExistsSafe(ByVal filePath As String, ByRef errMsg As String) As Boolean
     Dim n As String
-    Dim eNum As Long
-    Dim eDesc As String
+    Dim errNum As Long
+    Dim errDesc As String
 
     errMsg = vbNullString
     On Error Resume Next
     n = Dir(filePath)
-    eNum = Err.Number
-    eDesc = Err.Description
+    errNum = Err.Number
+    errDesc = Err.Description
     On Error GoTo 0
 
-    If eNum <> 0 Then
+    If errNum <> 0 Then
         errMsg = "Не удалось проверить файл мастера (Dir):" & vbCrLf & _
                  filePath & vbCrLf & vbCrLf & _
-                 FormatRuntimeError(eNum, eDesc, vbNullString, "FileExistsSafe")
+                 FormatRuntimeError(errNum, errDesc, vbNullString, "FileExistsSafe")
         FileExistsSafe = False
         Exit Function
     End If
@@ -231,8 +231,8 @@ End Function
 
 Private Function FolderExistsSafe(ByVal folderPath As String, ByRef errMsg As String) As Boolean
     Dim n As String
-    Dim eNum As Long
-    Dim eDesc As String
+    Dim errNum As Long
+    Dim errDesc As String
     Dim probe As String
 
     errMsg = vbNullString
@@ -247,14 +247,14 @@ Private Function FolderExistsSafe(ByVal folderPath As String, ByRef errMsg As St
 
     On Error Resume Next
     n = Dir(probe, vbDirectory)
-    eNum = Err.Number
-    eDesc = Err.Description
+    errNum = Err.Number
+    errDesc = Err.Description
     On Error GoTo 0
 
-    If eNum <> 0 Then
+    If errNum <> 0 Then
         errMsg = "Не удалось проверить папку мастера (Dir):" & vbCrLf & _
                  folderPath & vbCrLf & vbCrLf & _
-                 FormatRuntimeError(eNum, eDesc, vbNullString, "FolderExistsSafe")
+                 FormatRuntimeError(errNum, errDesc, vbNullString, "FolderExistsSafe")
         FolderExistsSafe = False
         Exit Function
     End If
@@ -344,7 +344,7 @@ Private Function CreateMasterWorkbook(ByVal srcWb As Workbook, _
             Source:=ws.Range(ws.Cells(1, 1), ws.Cells(1, hdr.Columns.Count)), _
             XlListObjectHasHeaders:=xlYes)
         destLo.Name = nm
-        ' Excel often inserts one blank body row — remove it
+        ' Excel often inserts one blank body row -- remove it
         On Error Resume Next
         If Not destLo.DataBodyRange Is Nothing Then
             destLo.DataBodyRange.Delete
@@ -379,8 +379,8 @@ Private Function AppendOneTable(ByVal srcWb As Workbook, _
     Dim newRow As ListRow
     Dim colCount As Long
     Dim vals As Variant
-    Dim eNum As Long
-    Dim eDesc As String
+    Dim errNum As Long
+    Dim errDesc As String
 
     added = 0
     skipped = 0
@@ -439,13 +439,13 @@ Private Function AppendOneTable(ByVal srcWb As Workbook, _
 
     On Error Resume Next
     Set existing = CreateObject("Scripting.Dictionary")
-    eNum = Err.Number
-    eDesc = Err.Description
+    errNum = Err.Number
+    errDesc = Err.Description
     On Error GoTo 0
-    If existing Is Nothing Or eNum <> 0 Then
+    If existing Is Nothing Or errNum <> 0 Then
         errMsg = "Не удалось создать Scripting.Dictionary." & vbCrLf & _
                  "Проверьте, что на ПК доступен Microsoft Scripting Runtime / scrrun.dll." & vbCrLf & vbCrLf & _
-                 FormatRuntimeError(eNum, eDesc, vbNullString, "AppendOneTable / CreateObject Dictionary")
+                 FormatRuntimeError(errNum, errDesc, vbNullString, "AppendOneTable / CreateObject Dictionary")
         Exit Function
     End If
     existing.CompareMode = 1 ' TextCompare
