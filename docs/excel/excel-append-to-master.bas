@@ -9,9 +9,12 @@ Option Explicit
 ' --- Edit this path (master is .xlsx, no macros needed in master) ---
 Private Const MASTER_PATH As String = "C:\Data\Lab_Master.xlsx"
 
-' Sheet name = ListObject name
-Private Const SHEET_LIST As String = "Stem_Flakes|DIET|CF|Kitchen|Ripper I|Other TI"
-Private Const OTHER_TI As String = "Other TI"
+' Each entry: sheetName=tableName (ListObject names cannot contain spaces)
+' Sheet tabs: Stem_Flakes, DIET, CF, Kitchen, Ripper I, Other TI
+' Tables:     Stem_Flakes, DIET, CF, Kitchen, Ripper_I, Other_TI
+Private Const SHEET_TABLE_MAP As String = _
+    "Stem_Flakes=Stem_Flakes|DIET=DIET|CF=CF|Kitchen=Kitchen|Ripper I=Ripper_I|Other TI=Other_TI"
+Private Const OTHER_TI_SHEET As String = "Other TI"
 
 '------------------------------------------------------------------------------
 ' Entry point: run from Macros dialog or assign to a button.
@@ -19,7 +22,9 @@ Private Const OTHER_TI As String = "Other TI"
 Public Sub AppendTablesToMaster()
     Dim srcWb As Workbook
     Dim mstWb As Workbook
-    Dim sheetNames() As String
+    Dim entries() As String
+    Dim sheetName As String
+    Dim tableName As String
     Dim i As Long
     Dim added As Long
     Dim skipped As Long
@@ -53,7 +58,7 @@ Public Sub AppendTablesToMaster()
         Exit Sub
     End If
 
-    sheetNames = Split(SHEET_LIST, "|")
+    entries = Split(SHEET_TABLE_MAP, "|")
 
     prevScreenUpdating = Application.ScreenUpdating
     prevEnableEvents = Application.EnableEvents
@@ -76,7 +81,7 @@ Public Sub AppendTablesToMaster()
             GoTo CleanFail
         End If
         whereProc = "AppendTablesToMaster / CreateMasterWorkbook"
-        Set mstWb = CreateMasterWorkbook(srcWb, sheetNames, errMsg)
+        Set mstWb = CreateMasterWorkbook(srcWb, entries, errMsg)
         If mstWb Is Nothing Then
             ' Soft validation failure -- errMsg already set; do NOT use Err (Number=0)
             If Len(errMsg) = 0 Then
@@ -94,23 +99,25 @@ Public Sub AppendTablesToMaster()
     totalAdded = 0
     totalSkipped = 0
 
-    For i = LBound(sheetNames) To UBound(sheetNames)
+    For i = LBound(entries) To UBound(entries)
+        ParseSheetTableEntry Trim$(entries(i)), sheetName, tableName
         added = 0
         skipped = 0
         errMsg = vbNullString
-        whereProc = "AppendOneTable / " & Trim$(sheetNames(i))
+        whereProc = "AppendOneTable / " & sheetName & " / " & tableName
 
-        If Not AppendOneTable(srcWb, mstWb, Trim$(sheetNames(i)), added, skipped, errMsg) Then
+        If Not AppendOneTable(srcWb, mstWb, sheetName, tableName, added, skipped, errMsg) Then
             softFail = True
             If Len(errMsg) = 0 Then
-                errMsg = "Не удалось обработать лист """ & Trim$(sheetNames(i)) & """."
+                errMsg = "Не удалось обработать лист """ & sheetName & _
+                         """ / таблицу """ & tableName & """."
             End If
             GoTo CleanFail
         End If
 
         totalAdded = totalAdded + added
         totalSkipped = totalSkipped + skipped
-        report = report & Trim$(sheetNames(i)) & ": добавлено " & CStr(added) & _
+        report = report & sheetName & " [" & tableName & "]: добавлено " & CStr(added) & _
                  ", пропущено (дубликаты) " & CStr(skipped) & vbCrLf
     Next i
 
@@ -263,14 +270,16 @@ Private Function FolderExistsSafe(ByVal folderPath As String, ByRef errMsg As St
 End Function
 
 '------------------------------------------------------------------------------
-' Create empty master with same sheet/table names and headers from source.
+' Create empty master with same sheet names, table names, and headers from source.
+' entries(): "sheetName=tableName" pairs from SHEET_TABLE_MAP.
 '------------------------------------------------------------------------------
 Private Function CreateMasterWorkbook(ByVal srcWb As Workbook, _
-                                      ByRef sheetNames() As String, _
+                                      ByRef entries() As String, _
                                       ByRef errMsg As String) As Workbook
     Dim mstWb As Workbook
     Dim i As Long
-    Dim nm As String
+    Dim sheetName As String
+    Dim tableName As String
     Dim srcLo As ListObject
     Dim ws As Worksheet
     Dim destLo As ListObject
@@ -295,19 +304,26 @@ Private Function CreateMasterWorkbook(ByVal srcWb As Workbook, _
         End If
     End If
 
-    ' Validate all source tables exist before creating anything on disk
-    For i = LBound(sheetNames) To UBound(sheetNames)
-        nm = Trim$(sheetNames(i))
-        If Not SheetExists(srcWb, nm) Then
-            errMsg = "В источнике нет листа: """ & nm & """"
+    ' Validate all source sheets/tables exist before creating anything on disk
+    For i = LBound(entries) To UBound(entries)
+        ParseSheetTableEntry Trim$(entries(i)), sheetName, tableName
+        If Len(sheetName) = 0 Or Len(tableName) = 0 Then
+            errMsg = "Некорректная запись в SHEET_TABLE_MAP: """ & Trim$(entries(i)) & """" & _
+                     vbCrLf & "Ожидается формат sheetName=tableName."
             Exit Function
         End If
-        Set srcLo = FindListObject(srcWb.Worksheets(nm), nm)
+        If Not SheetExists(srcWb, sheetName) Then
+            errMsg = "В источнике нет листа: """ & sheetName & """" & vbCrLf & _
+                     "(искали лист по имени вкладки; таблица: """ & tableName & """)"
+            Exit Function
+        End If
+        Set srcLo = FindListObject(srcWb.Worksheets(sheetName), tableName)
         If srcLo Is Nothing Then
-            errMsg = "На листе """ & nm & """ нет таблицы (ListObject) с именем """ & nm & """."
+            errMsg = "На листе """ & sheetName & """ нет таблицы (ListObject) с именем """ & _
+                     tableName & """."
             Exit Function
         End If
-        If Not ValidateKeyColumns(srcLo, nm, errMsg) Then
+        If Not ValidateKeyColumns(srcLo, sheetName, errMsg) Then
             Exit Function
         End If
     Next i
@@ -321,16 +337,16 @@ Private Function CreateMasterWorkbook(ByVal srcWb As Workbook, _
     Loop
     Application.DisplayAlerts = True
 
-    For i = LBound(sheetNames) To UBound(sheetNames)
-        nm = Trim$(sheetNames(i))
-        Set srcLo = FindListObject(srcWb.Worksheets(nm), nm)
+    For i = LBound(entries) To UBound(entries)
+        ParseSheetTableEntry Trim$(entries(i)), sheetName, tableName
+        Set srcLo = FindListObject(srcWb.Worksheets(sheetName), tableName)
 
-        If i = LBound(sheetNames) Then
+        If i = LBound(entries) Then
             Set ws = mstWb.Worksheets(1)
-            ws.Name = nm
+            ws.Name = sheetName
         Else
             Set ws = mstWb.Worksheets.Add(After:=mstWb.Worksheets(mstWb.Worksheets.Count))
-            ws.Name = nm
+            ws.Name = sheetName
         End If
 
         ' Copy header row only
@@ -343,7 +359,7 @@ Private Function CreateMasterWorkbook(ByVal srcWb As Workbook, _
             SourceType:=xlSrcRange, _
             Source:=ws.Range(ws.Cells(1, 1), ws.Cells(1, hdr.Columns.Count)), _
             XlListObjectHasHeaders:=xlYes)
-        destLo.Name = nm
+        destLo.Name = tableName
         ' Excel often inserts one blank body row -- remove it
         On Error Resume Next
         If Not destLo.DataBodyRange Is Nothing Then
@@ -358,10 +374,12 @@ End Function
 
 '------------------------------------------------------------------------------
 ' Append new rows from source table into master table. Returns False on hard error.
+' sheetName = worksheet tab; tableName = ListObject.Name (may differ when spaces).
 '------------------------------------------------------------------------------
 Private Function AppendOneTable(ByVal srcWb As Workbook, _
                                 ByVal mstWb As Workbook, _
-                                ByVal nm As String, _
+                                ByVal sheetName As String, _
+                                ByVal tableName As String, _
                                 ByRef added As Long, _
                                 ByRef skipped As Long, _
                                 ByRef errMsg As String) As Boolean
@@ -387,33 +405,34 @@ Private Function AppendOneTable(ByVal srcWb As Workbook, _
     AppendOneTable = False
     errMsg = vbNullString
 
-    If Not SheetExists(srcWb, nm) Then
-        errMsg = "В источнике нет листа: """ & nm & """"
+    If Not SheetExists(srcWb, sheetName) Then
+        errMsg = "В источнике нет листа: """ & sheetName & """" & vbCrLf & _
+                 "(искали лист по имени вкладки; таблица: """ & tableName & """)"
         Exit Function
     End If
-    If Not SheetExists(mstWb, nm) Then
-        errMsg = "В мастере нет листа: """ & nm & """" & vbCrLf & _
-                 "Ожидаются те же имена листов/таблиц, что в источнике."
+    If Not SheetExists(mstWb, sheetName) Then
+        errMsg = "В мастере нет листа: """ & sheetName & """" & vbCrLf & _
+                 "Ожидаются те же имена листов, что в источнике; таблица: """ & tableName & """."
         Exit Function
     End If
 
-    Set srcWs = srcWb.Worksheets(nm)
-    Set mstWs = mstWb.Worksheets(nm)
+    Set srcWs = srcWb.Worksheets(sheetName)
+    Set mstWs = mstWb.Worksheets(sheetName)
 
-    Set srcLo = FindListObject(srcWs, nm)
+    Set srcLo = FindListObject(srcWs, tableName)
     If srcLo Is Nothing Then
-        errMsg = "На листе источника """ & nm & """ нет таблицы """ & nm & """."
+        errMsg = "На листе источника """ & sheetName & """ нет таблицы """ & tableName & """."
         Exit Function
     End If
 
-    Set mstLo = FindListObject(mstWs, nm)
+    Set mstLo = FindListObject(mstWs, tableName)
     If mstLo Is Nothing Then
-        errMsg = "На листе мастера """ & nm & """ нет таблицы """ & nm & """."
+        errMsg = "На листе мастера """ & sheetName & """ нет таблицы """ & tableName & """."
         Exit Function
     End If
 
     If srcLo.ListColumns.Count <> mstLo.ListColumns.Count Then
-        errMsg = "Лист """ & nm & """: число столбцов в источнике (" & _
+        errMsg = "Лист """ & sheetName & """ [" & tableName & "]: число столбцов в источнике (" & _
                  CStr(srcLo.ListColumns.Count) & ") и мастере (" & _
                  CStr(mstLo.ListColumns.Count) & ") не совпадает."
         Exit Function
@@ -422,18 +441,18 @@ Private Function AppendOneTable(ByVal srcWb As Workbook, _
     ' Header names must match (stable columns)
     For c = 1 To srcLo.ListColumns.Count
         If StrComp(CStr(srcLo.ListColumns(c).Name), CStr(mstLo.ListColumns(c).Name), vbTextCompare) <> 0 Then
-            errMsg = "Лист """ & nm & """: заголовки не совпадают в столбце " & CStr(c) & _
-                     " (источник: """ & srcLo.ListColumns(c).Name & _
+            errMsg = "Лист """ & sheetName & """ [" & tableName & "]: заголовки не совпадают в столбце " & _
+                     CStr(c) & " (источник: """ & srcLo.ListColumns(c).Name & _
                      """, мастер: """ & mstLo.ListColumns(c).Name & """)."
             Exit Function
         End If
     Next c
 
-    If Not ResolveKeyColumnIndexes(srcLo, nm, keyCols, errMsg) Then
+    If Not ResolveKeyColumnIndexes(srcLo, sheetName, keyCols, errMsg) Then
         Exit Function
     End If
     ' Same columns must exist in master (already matched by header names)
-    If Not ResolveKeyColumnIndexes(mstLo, nm, keyCols, errMsg) Then
+    If Not ResolveKeyColumnIndexes(mstLo, sheetName, keyCols, errMsg) Then
         Exit Function
     End If
 
@@ -503,7 +522,7 @@ Private Function ResolveKeyColumnIndexes(ByVal lo As ListObject, _
     Dim i As Long
     Dim col As ListColumn
 
-    If StrComp(sheetName, OTHER_TI, vbTextCompare) = 0 Then
+    If StrComp(sheetName, OTHER_TI_SHEET, vbTextCompare) = 0 Then
         names = Split("Date|Cell|Point", "|")
     Else
         names = Split("Batch", "|")
@@ -568,6 +587,24 @@ Private Function BuildKeyFromRow(ByVal dataRng As Range, _
         BuildKeyFromRow = Join(parts, Chr$(1))
     End If
 End Function
+
+' Parse "sheetName=tableName"; if no "=", both names are the same token.
+Private Sub ParseSheetTableEntry(ByVal entry As String, _
+                                 ByRef sheetName As String, _
+                                 ByRef tableName As String)
+    Dim p As Long
+    Dim s As String
+
+    s = Trim$(entry)
+    p = InStr(1, s, "=")
+    If p <= 0 Then
+        sheetName = s
+        tableName = s
+    Else
+        sheetName = Trim$(Left$(s, p - 1))
+        tableName = Trim$(Mid$(s, p + 1))
+    End If
+End Sub
 
 Private Function FindListObject(ByVal ws As Worksheet, ByVal tableName As String) As ListObject
     Dim lo As ListObject
