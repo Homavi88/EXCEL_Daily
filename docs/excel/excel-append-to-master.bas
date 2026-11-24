@@ -31,6 +31,15 @@ Public Sub AppendTablesToMaster()
     Dim prevCalc As XlCalculation
     Dim createdMaster As Boolean
     Dim errMsg As String
+    Dim softFail As Boolean
+    Dim errNum As Long
+    Dim errDesc As String
+    Dim errSrc As String
+    Dim whereProc As String
+
+    softFail = False
+    whereProc = "AppendTablesToMaster"
+    errMsg = vbNullString
 
     Set srcWb = ActiveWorkbook
     If srcWb Is Nothing Then
@@ -38,7 +47,7 @@ Public Sub AppendTablesToMaster()
         Exit Sub
     End If
 
-    If Len(Dir(MASTER_PATH)) = 0 And Len(Trim$(MASTER_PATH)) = 0 Then
+    If Len(Trim$(MASTER_PATH)) = 0 Then
         MsgBox "Задайте константу MASTER_PATH в модуле modAppendToMaster.", _
                vbExclamation, "AppendToMaster"
         Exit Sub
@@ -57,12 +66,23 @@ Public Sub AppendTablesToMaster()
     Application.Calculation = xlCalculationManual
 
     ' Open or create master
-    If Len(Dir(MASTER_PATH)) > 0 Then
+    If FileExistsSafe(MASTER_PATH, errMsg) Then
+        whereProc = "AppendTablesToMaster / Workbooks.Open"
         Set mstWb = Workbooks.Open(Filename:=MASTER_PATH, ReadOnly:=False)
         createdMaster = False
     Else
+        If Len(errMsg) > 0 Then
+            softFail = True
+            GoTo CleanFail
+        End If
+        whereProc = "AppendTablesToMaster / CreateMasterWorkbook"
         Set mstWb = CreateMasterWorkbook(srcWb, sheetNames, errMsg)
         If mstWb Is Nothing Then
+            ' Soft validation failure — errMsg already set; do NOT use Err (Number=0)
+            If Len(errMsg) = 0 Then
+                errMsg = "Не удалось создать мастер-книгу."
+            End If
+            softFail = True
             GoTo CleanFail
         End If
         createdMaster = True
@@ -78,13 +98,14 @@ Public Sub AppendTablesToMaster()
         added = 0
         skipped = 0
         errMsg = vbNullString
+        whereProc = "AppendOneTable / " & Trim$(sheetNames(i))
 
         If Not AppendOneTable(srcWb, mstWb, Trim$(sheetNames(i)), added, skipped, errMsg) Then
-            ' Abort: do not save a partially validated corrupt state from missing structure
-            MsgBox errMsg, vbExclamation, "AppendToMaster"
-            mstWb.Close SaveChanges:=False
-            Set mstWb = Nothing
-            GoTo CleanExit
+            softFail = True
+            If Len(errMsg) = 0 Then
+                errMsg = "Не удалось обработать лист """ & Trim$(sheetNames(i)) & """."
+            End If
+            GoTo CleanFail
         End If
 
         totalAdded = totalAdded + added
@@ -93,6 +114,7 @@ Public Sub AppendTablesToMaster()
                  ", пропущено (дубликаты) " & CStr(skipped) & vbCrLf
     Next i
 
+    whereProc = "AppendTablesToMaster / Save"
     Application.DisplayAlerts = False
     If createdMaster Then
         mstWb.SaveAs Filename:=MASTER_PATH, FileFormat:=xlOpenXMLWorkbook ' .xlsx
@@ -109,28 +131,136 @@ Public Sub AppendTablesToMaster()
              "Мастер сохранён: " & MASTER_PATH
 
     MsgBox report, vbInformation, "AppendToMaster"
-
-CleanExit:
-    Application.ScreenUpdating = prevScreenUpdating
-    Application.EnableEvents = prevEnableEvents
-    Application.Calculation = prevCalc
-    Application.DisplayAlerts = True
-    Exit Sub
+    GoTo CleanExit
 
 CleanFail:
-    errMsg = "Ошибка: " & Err.Description & " (" & CStr(Err.Number) & ")"
+    ' Capture Err BEFORE any further On Error / Resume Next (clears Err)
+    errNum = Err.Number
+    errDesc = Err.Description
+    errSrc = Err.Source
+
+    If softFail Then
+        ' Keep intentional errMsg; never replace with blank «Ошибка 0»
+        If Len(Trim$(errMsg)) = 0 Then
+            errMsg = FormatRuntimeError(errNum, errDesc, errSrc, whereProc)
+        Else
+            errMsg = errMsg & vbCrLf & vbCrLf & "Где: " & whereProc
+        End If
+    Else
+        errMsg = FormatRuntimeError(errNum, errDesc, errSrc, whereProc)
+    End If
+
     On Error Resume Next
     If Not mstWb Is Nothing Then
         mstWb.Close SaveChanges:=False
         Set mstWb = Nothing
     End If
     On Error GoTo 0
+
     Application.ScreenUpdating = prevScreenUpdating
     Application.EnableEvents = prevEnableEvents
     Application.Calculation = prevCalc
     Application.DisplayAlerts = True
-    MsgBox errMsg, vbCritical, "AppendToMaster"
+
+    MsgBox errMsg, IIf(softFail, vbExclamation, vbCritical), "AppendToMaster"
+    Exit Sub
+
+CleanExit:
+    Application.ScreenUpdating = prevScreenUpdating
+    Application.EnableEvents = prevEnableEvents
+    Application.Calculation = prevCalc
+    Application.DisplayAlerts = True
 End Sub
+
+'------------------------------------------------------------------------------
+' Build a non-blank error message even when Err.Number = 0.
+'------------------------------------------------------------------------------
+Private Function FormatRuntimeError(ByVal errNum As Long, _
+                                    ByVal errDesc As String, _
+                                    ByVal errSrc As String, _
+                                    ByVal whereProc As String) As String
+    Dim parts As String
+    Dim desc As String
+
+    desc = Trim$(errDesc)
+    If Len(desc) = 0 Then
+        If errNum = 0 Then
+            desc = "(нет текста Err.Description — сбой без runtime-ошибки VBA)"
+        Else
+            desc = "(пустое описание)"
+        End If
+    End If
+
+    parts = "Ошибка " & CStr(errNum) & ": " & desc
+    If Len(Trim$(errSrc)) > 0 Then
+        parts = parts & vbCrLf & "Источник Err: " & errSrc
+    End If
+    If Len(Trim$(whereProc)) > 0 Then
+        parts = parts & vbCrLf & "Процедура: " & whereProc
+    End If
+
+    FormatRuntimeError = parts
+End Function
+
+'------------------------------------------------------------------------------
+' Safe file exists via Dir; captures Dir failures (network / bad path).
+' Returns False and sets errMsg on Dir error; False + empty errMsg if missing.
+'------------------------------------------------------------------------------
+Private Function FileExistsSafe(ByVal filePath As String, ByRef errMsg As String) As Boolean
+    Dim n As String
+    Dim eNum As Long
+    Dim eDesc As String
+
+    errMsg = vbNullString
+    On Error Resume Next
+    n = Dir(filePath)
+    eNum = Err.Number
+    eDesc = Err.Description
+    On Error GoTo 0
+
+    If eNum <> 0 Then
+        errMsg = "Не удалось проверить файл мастера (Dir):" & vbCrLf & _
+                 filePath & vbCrLf & vbCrLf & _
+                 FormatRuntimeError(eNum, eDesc, vbNullString, "FileExistsSafe")
+        FileExistsSafe = False
+        Exit Function
+    End If
+
+    FileExistsSafe = (Len(n) > 0)
+End Function
+
+Private Function FolderExistsSafe(ByVal folderPath As String, ByRef errMsg As String) As Boolean
+    Dim n As String
+    Dim eNum As Long
+    Dim eDesc As String
+    Dim probe As String
+
+    errMsg = vbNullString
+    If Len(folderPath) = 0 Then
+        FolderExistsSafe = False
+        Exit Function
+    End If
+
+    ' Dir(path, vbDirectory) is flaky on some network paths; also try trailing slash
+    probe = folderPath
+    If Right$(probe, 1) <> "\" Then probe = probe & "\"
+
+    On Error Resume Next
+    n = Dir(probe, vbDirectory)
+    eNum = Err.Number
+    eDesc = Err.Description
+    On Error GoTo 0
+
+    If eNum <> 0 Then
+        errMsg = "Не удалось проверить папку мастера (Dir):" & vbCrLf & _
+                 folderPath & vbCrLf & vbCrLf & _
+                 FormatRuntimeError(eNum, eDesc, vbNullString, "FolderExistsSafe")
+        FolderExistsSafe = False
+        Exit Function
+    End If
+
+    FolderExistsSafe = (Len(n) > 0)
+End Function
 
 '------------------------------------------------------------------------------
 ' Create empty master with same sheet/table names and headers from source.
@@ -147,15 +277,20 @@ Private Function CreateMasterWorkbook(ByVal srcWb As Workbook, _
     Dim hdr As Range
     Dim c As Long
     Dim folderPath As String
+    Dim folderErr As String
 
     errMsg = vbNullString
+    Set CreateMasterWorkbook = Nothing
 
     ' Ensure parent folder exists
     folderPath = Left$(MASTER_PATH, InStrRev(MASTER_PATH, "\") - 1)
     If Len(folderPath) > 0 Then
-        If Len(Dir(folderPath, vbDirectory)) = 0 Then
-            errMsg = "Папка для мастера не найдена:" & vbCrLf & folderPath
-            Set CreateMasterWorkbook = Nothing
+        If Not FolderExistsSafe(folderPath, folderErr) Then
+            If Len(folderErr) > 0 Then
+                errMsg = folderErr
+            Else
+                errMsg = "Папка для мастера не найдена:" & vbCrLf & folderPath
+            End If
             Exit Function
         End If
     End If
@@ -165,17 +300,14 @@ Private Function CreateMasterWorkbook(ByVal srcWb As Workbook, _
         nm = Trim$(sheetNames(i))
         If Not SheetExists(srcWb, nm) Then
             errMsg = "В источнике нет листа: """ & nm & """"
-            Set CreateMasterWorkbook = Nothing
             Exit Function
         End If
         Set srcLo = FindListObject(srcWb.Worksheets(nm), nm)
         If srcLo Is Nothing Then
             errMsg = "На листе """ & nm & """ нет таблицы (ListObject) с именем """ & nm & """."
-            Set CreateMasterWorkbook = Nothing
             Exit Function
         End If
         If Not ValidateKeyColumns(srcLo, nm, errMsg) Then
-            Set CreateMasterWorkbook = Nothing
             Exit Function
         End If
     Next i
@@ -247,10 +379,13 @@ Private Function AppendOneTable(ByVal srcWb As Workbook, _
     Dim newRow As ListRow
     Dim colCount As Long
     Dim vals As Variant
+    Dim eNum As Long
+    Dim eDesc As String
 
     added = 0
     skipped = 0
     AppendOneTable = False
+    errMsg = vbNullString
 
     If Not SheetExists(srcWb, nm) Then
         errMsg = "В источнике нет листа: """ & nm & """"
@@ -302,7 +437,17 @@ Private Function AppendOneTable(ByVal srcWb As Workbook, _
         Exit Function
     End If
 
+    On Error Resume Next
     Set existing = CreateObject("Scripting.Dictionary")
+    eNum = Err.Number
+    eDesc = Err.Description
+    On Error GoTo 0
+    If existing Is Nothing Or eNum <> 0 Then
+        errMsg = "Не удалось создать Scripting.Dictionary." & vbCrLf & _
+                 "Проверьте, что на ПК доступен Microsoft Scripting Runtime / scrrun.dll." & vbCrLf & vbCrLf & _
+                 FormatRuntimeError(eNum, eDesc, vbNullString, "AppendOneTable / CreateObject Dictionary")
+        Exit Function
+    End If
     existing.CompareMode = 1 ' TextCompare
 
     ' Index existing master keys
