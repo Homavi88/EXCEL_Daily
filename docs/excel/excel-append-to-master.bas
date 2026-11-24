@@ -15,6 +15,8 @@ Private Const MASTER_PATH As String = "C:\Data\Lab_Master.xlsx"
 Private Const SHEET_TABLE_MAP As String = _
     "Stem_Flakes=Stem_Flakes|DIET=DIET|CF=CF|Kitchen=Kitchen|Ripper I=Ripper_I|Other TI=Other_TI"
 Private Const OTHER_TI_SHEET As String = "Other TI"
+' Explicit date format for Europe/Moscow (not locale Custom m/d/yyyy from source)
+Private Const DATE_NUMBER_FORMAT As String = "dd.mm.yyyy"
 
 '------------------------------------------------------------------------------
 ' Entry point: run from Macros dialog or assign to a button.
@@ -367,6 +369,9 @@ Private Function CreateMasterWorkbook(ByVal srcWb As Workbook, _
         End If
         destLo.TableStyle = srcLo.TableStyle
         On Error GoTo 0
+
+        ' Date column: proper date NumberFormat (not Custom leftover from source)
+        CoerceAndFormatDateColumn destLo
     Next i
 
     Set CreateMasterWorkbook = mstWb
@@ -397,6 +402,7 @@ Private Function AppendOneTable(ByVal srcWb As Workbook, _
     Dim newRow As ListRow
     Dim colCount As Long
     Dim vals As Variant
+    Dim dateColIdx As Long
     Dim errNum As Long
     Dim errDesc As String
 
@@ -469,6 +475,8 @@ Private Function AppendOneTable(ByVal srcWb As Workbook, _
     End If
     existing.CompareMode = 1 ' TextCompare
 
+    dateColIdx = FindDateColumnIndex(mstLo)
+
     ' Index existing master keys
     If Not mstLo.DataBodyRange Is Nothing Then
         Set mstData = mstLo.DataBodyRange
@@ -481,6 +489,8 @@ Private Function AppendOneTable(ByVal srcWb As Workbook, _
     End If
 
     If srcLo.DataBodyRange Is Nothing Then
+        ' Still normalize Date on existing master rows
+        CoerceAndFormatDateColumn mstLo
         AppendOneTable = True
         Exit Function
     End If
@@ -498,6 +508,13 @@ Private Function AppendOneTable(ByVal srcWb As Workbook, _
         Else
             Set newRow = mstLo.ListRows.Add(AlwaysInsert:=True)
             vals = srcData.Rows(r).Value
+            If dateColIdx > 0 Then
+                If colCount = 1 Then
+                    vals = CoerceCellToDate(vals)
+                Else
+                    vals(1, dateColIdx) = CoerceCellToDate(vals(1, dateColIdx))
+                End If
+            End If
             If colCount = 1 Then
                 newRow.Range.Cells(1, 1).Value = vals
             Else
@@ -507,6 +524,9 @@ Private Function AppendOneTable(ByVal srcWb As Workbook, _
             added = added + 1
         End If
     Next r
+
+    ' Coerce text dates + apply dd.mm.yyyy on entire master Date column
+    CoerceAndFormatDateColumn mstLo
 
     AppendOneTable = True
 End Function
@@ -561,6 +581,8 @@ Private Function BuildKeyFromRow(ByVal dataRng As Range, _
     Dim v As Variant
     Dim s As String
     Dim allEmpty As Boolean
+    Dim d As Date
+    Dim coerced As Variant
 
     ReDim parts(LBound(keyCols) To UBound(keyCols))
     allEmpty = True
@@ -569,13 +591,19 @@ Private Function BuildKeyFromRow(ByVal dataRng As Range, _
         v = dataRng.Cells(rowIndex, keyCols(i)).Value
         If IsError(v) Then
             s = "#ERR"
-        ElseIf IsDate(v) And VarType(v) <> vbString Then
-            ' Normalize dates to ISO-like string for stable keys
-            s = Format$(CDate(v), "yyyy-mm-dd")
         ElseIf IsEmpty(v) Then
             s = vbNullString
         Else
-            s = Trim$(CStr(v))
+            ' Normalize real dates and date-like text to ISO for stable keys
+            coerced = CoerceCellToDate(v)
+            If VarType(coerced) = vbDate Then
+                d = CDate(coerced)
+                s = Format$(d, "yyyy-mm-dd")
+            ElseIf IsEmpty(coerced) Then
+                s = vbNullString
+            Else
+                s = Trim$(CStr(v))
+            End If
         End If
         If Len(s) > 0 Then allEmpty = False
         parts(i) = LCase$(s)
@@ -587,6 +615,129 @@ Private Function BuildKeyFromRow(ByVal dataRng As Range, _
         BuildKeyFromRow = Join(parts, Chr$(1))
     End If
 End Function
+
+'------------------------------------------------------------------------------
+' Find ListColumn named "Date" (case-insensitive). Returns 0 if absent.
+'------------------------------------------------------------------------------
+Private Function FindDateColumnIndex(ByVal lo As ListObject) As Long
+    Dim c As Long
+    For c = 1 To lo.ListColumns.Count
+        If StrComp(Trim$(CStr(lo.ListColumns(c).Name)), "Date", vbTextCompare) = 0 Then
+            FindDateColumnIndex = c
+            Exit Function
+        End If
+    Next c
+    FindDateColumnIndex = 0
+End Function
+
+'------------------------------------------------------------------------------
+' Coerce text/serial into a real VBA Date when possible.
+' Blanks (Empty / "") stay Empty; non-dates and errors left unchanged.
+'------------------------------------------------------------------------------
+Private Function CoerceCellToDate(ByVal v As Variant) As Variant
+    Dim s As String
+    Dim d As Date
+    Dim errNum As Long
+
+    If IsError(v) Then
+        CoerceCellToDate = v
+        Exit Function
+    End If
+
+    If IsEmpty(v) Then
+        CoerceCellToDate = Empty
+        Exit Function
+    End If
+
+    If VarType(v) = vbString Then
+        s = Trim$(CStr(v))
+        If Len(s) = 0 Then
+            CoerceCellToDate = Empty
+            Exit Function
+        End If
+        On Error Resume Next
+        Err.Clear
+        If IsDate(s) Then
+            d = CDate(s)
+        Else
+            d = DateValue(s)
+        End If
+        errNum = Err.Number
+        On Error GoTo 0
+        If errNum = 0 Then
+            CoerceCellToDate = d
+        Else
+            CoerceCellToDate = v
+        End If
+        Exit Function
+    End If
+
+    If VarType(v) = vbDate Then
+        CoerceCellToDate = CDate(v)
+        Exit Function
+    End If
+
+    ' Numeric Excel serial (or other) -- only if VBA recognizes it as a date
+    On Error Resume Next
+    Err.Clear
+    If IsDate(v) Then
+        d = CDate(v)
+        errNum = Err.Number
+        On Error GoTo 0
+        If errNum = 0 Then
+            CoerceCellToDate = d
+        Else
+            CoerceCellToDate = v
+        End If
+    Else
+        On Error GoTo 0
+        CoerceCellToDate = v
+    End If
+End Function
+
+'------------------------------------------------------------------------------
+' Coerce Date-column cells to real dates and set NumberFormat = dd.mm.yyyy.
+' Safe no-op when the table has no Date column. Does not touch other columns.
+'------------------------------------------------------------------------------
+Private Sub CoerceAndFormatDateColumn(ByVal lo As ListObject)
+    Dim idx As Long
+    Dim col As ListColumn
+    Dim cell As Range
+    Dim v As Variant
+    Dim coerced As Variant
+
+    idx = FindDateColumnIndex(lo)
+    If idx = 0 Then Exit Sub
+
+    Set col = lo.ListColumns(idx)
+
+    If Not col.DataBodyRange Is Nothing Then
+        For Each cell In col.DataBodyRange.Cells
+            v = cell.Value
+            coerced = CoerceCellToDate(v)
+            If IsEmpty(coerced) Then
+                ' Clear blank-looking text so the cell stays empty
+                If VarType(v) = vbString And Len(Trim$(CStr(v))) = 0 Then
+                    cell.Value = Empty
+                End If
+            ElseIf VarType(coerced) = vbDate Then
+                ' Write real date serial when source was text/serial or differs
+                If VarType(v) <> vbDate Then
+                    cell.Value = coerced
+                ElseIf CDate(v) <> CDate(coerced) Then
+                    cell.Value = coerced
+                End If
+            End If
+            ' Non-date values left as-is (Batch and other columns are never touched)
+        Next cell
+        col.DataBodyRange.NumberFormat = DATE_NUMBER_FORMAT
+    End If
+
+    ' Ensure column (incl. empty table / future rows) uses date format, not Custom
+    On Error Resume Next
+    col.Range.NumberFormat = DATE_NUMBER_FORMAT
+    On Error GoTo 0
+End Sub
 
 ' Parse "sheetName=tableName"; if no "=", both names are the same token.
 Private Sub ParseSheetTableEntry(ByVal entry As String, _
